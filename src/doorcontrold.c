@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <string.h>
 #include <stdarg.h>
+#include <time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <syslog.h>
@@ -24,11 +25,18 @@
 #define PIN_DOOR_FREE 6
 #define PIN_SWITCH_PRESSED 5
 #define IN_PIN_SWITCH 0
+#define IN_PIN_ALARM 3
+
+#define SLEEP 200
+#define TIME_OPEN_RELAY 10000
 
 static volatile int exit_flag = 0;
 static volatile int alarm_flag = 0;
 static volatile int switch_pressed = 0;
 static volatile int hw_addr = 0;
+
+static volatile unsigned int alarm_raised_ts = 0;
+static volatile unsigned int standby_ts = 0;
 
 
 int main (int argc, char *argv[])
@@ -53,7 +61,7 @@ int main (int argc, char *argv[])
 			md_alarm_raised();
 		}
 
-		sleep(1);
+		md_msleep(SLEEP);
 	}
 
 	md_destroy();
@@ -68,12 +76,11 @@ void md_open_door()
 
 	pifacedigital_digital_write(PIN_DOOR_FREE, 0);
 	pifacedigital_digital_write(PIN_SWITCH_PRESSED, 1);	
-	md_blink(PIN_DOOR_RELAY, 10);
+	md_blink(PIN_DOOR_RELAY, TIME_OPEN_RELAY);
 	pifacedigital_digital_write(PIN_SWITCH_PRESSED, 0);
 
 	md_log("Door opened. Alarm cleared");
-	alarm_flag = 0;
-	switch_pressed = 0;
+	md_clear_alarm();
 }
 
 void md_init()
@@ -97,8 +104,14 @@ void md_alarm_raised()
 
 	uint8_t switch_state;
 
-	pifacedigital_digital_write(PIN_STANDBY, 0);
-	pifacedigital_digital_write(PIN_DOOR_FREE, 1);
+	if(alarm_raised_ts == 0)
+	{
+		alarm_raised_ts = (unsigned) time(NULL);
+		md_log("alarm raised at %u\n", alarm_raised_ts);
+
+		pifacedigital_digital_write(PIN_STANDBY, 0);
+		pifacedigital_digital_write(PIN_DOOR_FREE, 1);
+	}
 
 	switch_state = pifacedigital_digital_read(IN_PIN_SWITCH);
 	if(switch_state == 0) {
@@ -108,15 +121,38 @@ void md_alarm_raised()
 
 void md_standby()
 {
-	pifacedigital_digital_write(PIN_DOOR_FREE, 0);
-	md_blink (PIN_STANDBY, 1);
+	uint8_t switch_state;
+
+	if(standby_ts == 0)
+	{
+		standby_ts = (unsigned) time(NULL);
+		md_log("standby at %u\n", standby_ts);
+
+		pifacedigital_digital_write(PIN_DOOR_FREE, 0);
+	}
+
+	switch_state = pifacedigital_digital_read(IN_PIN_ALARM);
+	if(switch_state == 0) {
+		alarm_flag = 1;		
+	}
+
+	md_blink (PIN_STANDBY, 200);
 }
 
-void md_blink(int i, int s)
+void md_blink(int i, int ms)
 {
         pifacedigital_digital_write(i, 1);
-        sleep(s);
+        md_msleep(ms);
         pifacedigital_digital_write(i, 0);
+}
+
+void md_clear_alarm()
+{
+	alarm_flag = 0;
+	switch_pressed = 0;
+
+	alarm_raised_ts = 0;
+	standby_ts = 0;
 }
 
 void md_signal_handler (int sig) {
@@ -132,8 +168,8 @@ void md_signal_handler (int sig) {
 			alarm_flag = 1;
 			break;
 		case SIGUSR2:
+			md_clear_alarm();
 			md_log("SIGUSR2 caught. Alarm cleared.");
-			alarm_flag = 0;
 			break;
 		default:
 			md_log("Signal %i caught.", sig);
@@ -209,4 +245,12 @@ void md_daemonize()
 
 	/* Open the log file */
 	openlog ("doorcontrold", LOG_PID, LOG_DAEMON);
+}
+
+void md_msleep(int millis)
+{
+	struct timespec ts;
+	ts.tv_sec = millis / 1000;
+	ts.tv_nsec = (millis % 1000) * 1000000;
+	nanosleep(&ts, NULL);
 }
